@@ -12,6 +12,7 @@
 pagetable_t kernel_pagetable;
 
 extern char etext[];  // kernel.ld sets this to end of kernel code.
+extern char end[]; 
 
 extern char trampoline[]; // trampoline.S
 
@@ -308,7 +309,6 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
   pte_t *pte;
   uint64 pa, i;
   uint flags;
-  char *mem;
 
   for(i = 0; i < sz; i += PGSIZE){
     if((pte = walk(old, i, 0)) == 0)
@@ -316,12 +316,14 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
     if((*pte & PTE_V) == 0)
       panic("uvmcopy: page not present");
     pa = PTE2PA(*pte);
+    if (*pte & PTE_W) {
+      *pte &= ~PTE_W;
+      *pte |= PTE_C;
+    }
     flags = PTE_FLAGS(*pte);
-    if((mem = kalloc()) == 0)
-      goto err;
-    memmove(mem, (char*)pa, PGSIZE);
-    if(mappages(new, i, PGSIZE, (uint64)mem, flags) != 0){
-      kfree(mem);
+    inc_ref(pa);
+    if(mappages(new, i, PGSIZE, pa, flags) != 0){
+      dec_ref(pa);
       goto err;
     }
   }
@@ -330,6 +332,45 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
  err:
   uvmunmap(new, 0, i / PGSIZE, 1);
   return -1;
+}
+
+int
+uvmcow(pagetable_t pagetable, uint64 addr)
+{
+  pte_t *pte;
+  uint64 pa;
+  uint flags;
+  char *mem;
+
+    if((pte = walk(pagetable, addr, 0)) == 0)
+      return -1;      
+    if((*pte & PTE_V) == 0)
+      return -1;
+    if((*pte & PTE_C) == 0)
+      return -1;
+    if ((mem = kalloc()) == 0) {
+      return -1;
+    }
+    pa = PTE2PA(*pte);
+    
+    if(((uint64)pa % PGSIZE) != 0 || (char*)pa < end || (uint64)pa >= PHYSTOP) {
+      return -1;
+    }
+
+    flags = PTE_FLAGS(*pte);
+    flags |= PTE_W;
+    flags &= ~PTE_C;
+
+    memmove(mem, (char*)pa, PGSIZE);
+
+    uvmunmap(pagetable, PGROUNDDOWN(addr),1,0);
+
+    if(mappages(pagetable, PGROUNDDOWN(addr), PGSIZE, pa, flags) != 0){
+      kfree(mem);
+      return -1;
+    }
+
+  return 0;
 }
 
 // mark a PTE invalid for user access.
@@ -352,12 +393,25 @@ int
 copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
 {
   uint64 n, va0, pa0;
+  pte_t *pte;
 
   while(len > 0){
     va0 = PGROUNDDOWN(dstva);
-    pa0 = walkaddr(pagetable, va0);
-    if(pa0 == 0)
+    if (va0 >= MAXVA) {
       return -1;
+    }
+    if ((pte = walk(pagetable, va0, 0)) == 0) {
+      return -1;
+    }
+    if (*pte & PTE_C) {
+      if (uvmcow(pagetable, va0) == -1) {
+        panic("panic: copyout uvmcow");
+      }
+    }
+    pa0 = walkaddr(pagetable, va0);
+    if(pa0 == 0 || ((uint64)pa0 % PGSIZE) != 0 || (char*)pa0 < end || (uint64)pa0 >= PHYSTOP) {
+      return -1;
+    }
     n = PGSIZE - (dstva - va0);
     if(n > len)
       n = len;

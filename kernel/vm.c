@@ -341,7 +341,9 @@ uvmcow(pagetable_t pagetable, uint64 addr)
   uint64 pa;
   uint flags;
   char *mem;
-
+    
+    if (addr >= MAXVA)
+      return -1;
     if((pte = walk(pagetable, addr, 0)) == 0)
       return -1;      
     if((*pte & PTE_V) == 0)
@@ -363,9 +365,9 @@ uvmcow(pagetable_t pagetable, uint64 addr)
 
     memmove(mem, (char*)pa, PGSIZE);
 
-    uvmunmap(pagetable, PGROUNDDOWN(addr),1,0);
+    uvmunmap(pagetable, PGROUNDDOWN(addr),1,1);
 
-    if(mappages(pagetable, PGROUNDDOWN(addr), PGSIZE, pa, flags) != 0){
+    if(mappages(pagetable, PGROUNDDOWN(addr), PGSIZE,(uint64) mem, flags) != 0){
       kfree(mem);
       return -1;
     }
